@@ -2224,8 +2224,33 @@ struct decompress_io_ctx *f2fs_alloc_dic(struct compress_ctx *cc)
 		 */
 		for (i = 0; i < dic->cluster_size; i++) {
 			/* only care about pages will be read */
-			if (!cc->rpages[i])
+			if (!cc->rpages[i]) {
+				/*
+				 * if there are NULL in rpages[], need alloc
+				 * previous cpage and reset all states, e.g
+				 *
+				 *           NULL          NULL
+				 * rpages: |------|-+----|------|--+---|
+				 *                  /              /
+				 *                 /       .------'
+				 *                |       /
+				 * cpages: |------|------|------|
+				 *
+				 * cpages[1] is allocated here
+				 */
+				if (prev_blkidx != -1 && !dic->cpages[prev_blkidx]) {
+					page = f2fs_compress_alloc_page();
+					if (!page)
+						goto out_free;
+
+					f2fs_set_compressed_page(page, cc->inode,
+								 start_idx + prev_blkidx + 1, dic);
+					dic->cpages[prev_blkidx] = page;
+					prev_blkidx = -1;
+					cnt++;
+				}
 				continue;
+			}
 
 			blkidx = dic->di[i].blkidx;
 			if (prev_blkidx == -1) {
@@ -2237,14 +2262,35 @@ struct decompress_io_ctx *f2fs_alloc_dic(struct compress_ctx *cc)
 				 * cross-block, we have to read the previous
 				 * cpage
 				 */
-				if (dic->di[i].cross_block)
+				if (dic->di[i].cross_block) {
 					prev_blkidx--;
+					f2fs_bug_on(F2FS_I_SB(cc->inode), i == 0);
+				}
 			}
 
+			/*
+			 * it is the first page, continue to check if it can
+			 * be inplace_io
+			 */
 			if (prev_blkidx == blkidx)
 				continue;
+			/*
+			 * if cpage already allocated, skip it, e.g
+			 *
+			 *           NULL          NULL
+			 * rpages: |------|-+----|------|--+---|
+			 *                  /              /
+			 *                 /       .------'
+			 *                |       /
+			 * cpages: |------|------|------|
+			 *
+			 * cpages[1] is allocated by above alloc
+			 */
+			if (dic->cpages[prev_blkidx]) {
+				prev_blkidx = blkidx;
+				continue;
+			}
 
-			f2fs_bug_on(F2FS_I_SB(cc->inode), dic->cpages[prev_blkidx]);
 			/* If di[i] is cross_blocks, di[i-1] must exist */
 			if (dic->di[i].cross_block && dic->di[i-1].is_compress) {
 				page = dic->rpages[i];
@@ -2266,7 +2312,7 @@ struct decompress_io_ctx *f2fs_alloc_dic(struct compress_ctx *cc)
 			cnt++;
 		}
 
-		if (!dic->cpages[prev_blkidx]) {
+		if (prev_blkidx != -1 && !dic->cpages[prev_blkidx]) {
 			page = f2fs_compress_alloc_page();
 			if (!page) {
 				goto out_free;
@@ -2337,6 +2383,7 @@ static void __f2fs_decompress_end_io(struct decompress_io_ctx *dic, bool failed)
 {
 #ifdef CONFIG_F2FS_FS_COMPRESSION_FIXED_OUTPUT
 	pgoff_t start_idx = dic->cluster_idx << dic->log_cluster_size;
+	bool skip_unlock;
 #endif
 	int i;
 
@@ -2345,6 +2392,19 @@ static void __f2fs_decompress_end_io(struct decompress_io_ctx *dic, bool failed)
 
 		if (!rpage)
 			continue;
+
+#ifdef CONFIG_F2FS_FS_COMPRESSION_FIXED_OUTPUT
+		/*
+		 * if cpage is inplace io, it reuses rpage. In order to avoid
+		 * double unlock_page, keep the rpage locked here, and unlock
+		 * it when cpage is released later in f2fs_free_dic.
+		 */
+		skip_unlock = false;
+		if (f2fs_is_compressed_page(rpage)) {
+			f2fs_restore_compressed_page(rpage, start_idx + i);
+			skip_unlock = true;
+		}
+#endif
 
 		/* PG_error was set if verity failed. */
 		if (failed || PageError(rpage)) {
@@ -2355,15 +2415,8 @@ static void __f2fs_decompress_end_io(struct decompress_io_ctx *dic, bool failed)
 			SetPageUptodate(rpage);
 		}
 #ifdef CONFIG_F2FS_FS_COMPRESSION_FIXED_OUTPUT
-		/*
-		 * if cpage is inplace io, it reuses rpage. In order to avoid
-		 * double unlock_page, keep the rpage locked here, and unlock
-		 * it when cpage is released later in f2fs_free_dic.
-		 */
-		if (f2fs_is_compressed_page(rpage)) {
-			f2fs_restore_compressed_page(rpage, start_idx + i);
+		if (skip_unlock)
 			continue;
-		}
 #endif
 		unlock_page(rpage);
 	}

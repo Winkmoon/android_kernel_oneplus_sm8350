@@ -66,9 +66,11 @@ bool may_set_compr_fl = false;
 #define LOG_PAGE_INTO_LIST(head, page)	do {			\
 	struct page_list *tmp;					\
 	tmp = f2fs_kmem_cache_alloc(page_info_slab, GFP_NOFS);	\
-	tmp->page = page;					\
-	INIT_LIST_HEAD(&tmp->list);				\
-	list_add_tail(&tmp->list, &head);			\
+	if (tmp) {						\
+		tmp->page = page;					\
+		INIT_LIST_HEAD(&tmp->list);				\
+		list_add_tail(&tmp->list, &head);			\
+	}							\
 } while (0)
 
 #define FREE_FIRST_PAGE_IN_LIST(head)	do {			\
@@ -6192,15 +6194,16 @@ int f2fs_transfer_project_quota(struct inode *inode, kprojid_t kprojid)
 	struct dquot *transfer_to[MAXQUOTAS] = {};
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct super_block *sb = sbi->sb;
-	int err = 0;
+	int err;
 
 	transfer_to[PRJQUOTA] = dqget(sb, make_kqid_projid(kprojid));
-	if (!IS_ERR(transfer_to[PRJQUOTA])) {
-		err = __dquot_transfer(inode, transfer_to);
-		if (err)
-			set_sbi_flag(sbi, SBI_QUOTA_NEED_REPAIR);
-		dqput(transfer_to[PRJQUOTA]);
-	}
+	if (IS_ERR(transfer_to[PRJQUOTA]))
+		return PTR_ERR(transfer_to[PRJQUOTA]);
+
+	err = __dquot_transfer(inode, transfer_to);
+	if (err)
+		set_sbi_flag(sbi, SBI_QUOTA_NEED_REPAIR);
+	dqput(transfer_to[PRJQUOTA]);
 	return err;
 }
 
