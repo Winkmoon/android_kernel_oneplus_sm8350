@@ -2243,7 +2243,8 @@ static size_t binder_get_object(struct binder_proc *proc,
 	size_t object_size = 0;
 
 	read_size = min_t(size_t, sizeof(*object), buffer->data_size - offset);
-	if (offset > buffer->data_size || read_size < sizeof(*hdr))
+	if (offset > buffer->data_size || read_size < sizeof(*hdr) ||
+	    !IS_ALIGNED(offset, sizeof(u32)))
 		return 0;
 	if (u) {
 		if (copy_from_user(object, u + offset, read_size))
@@ -3293,6 +3294,9 @@ static int binder_proc_transaction(struct binder_transaction *t,
         struct task_struct *grp_leader = NULL;
         struct task_struct *curr = current;
 #endif
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+	bool enqueue_task = true;
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 	BUG_ON(!node);
 	binder_node_lock(node);
 
@@ -3351,10 +3355,18 @@ static int binder_proc_transaction(struct binder_transaction *t,
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
 		if (sysctl_sched_assist_enabled) {
 			if (!oneway || proc->proc_type)
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+				binder_set_inherit_ux(thread->task, current, true);
+#else
 				binder_set_inherit_ux(thread->task, current);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 		}
 #endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
 	} else if (!pending_async) {
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+		android_vh_binder_special_task_handler(t, proc, thread,
+			&t->work, &proc->todo, !oneway, &enqueue_task);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 #if defined(CONFIG_OPLUS_FEATURE_BINDER_STATS_ENABLE)
 		if (NULL != proc && NULL != proc->tsk) {
 			binder_notify_obj.binder_task = proc->tsk;
@@ -3364,29 +3376,47 @@ static int binder_proc_transaction(struct binder_transaction *t,
 #ifdef CONFIG_OPLUS_BINDER_STRATEGY
 		obwork_restrict(proc, t);
 #else
-		binder_enqueue_work_ilocked(&t->work, &proc->todo);
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+		if (enqueue_task)
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
+		    binder_enqueue_work_ilocked(&t->work, &proc->todo);
 #endif
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
 		if (sysctl_sched_assist_enabled) {
 			if ((!oneway || proc->proc_type) && proc->max_threads == 0) {
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+				binder_set_inherit_ux(proc->tsk, current, true);
+#else
 				binder_set_inherit_ux(proc->tsk, current);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 			}
 		}
 #endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
 	} else {
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+		android_vh_binder_special_task_handler(t, proc, thread,
+			&t->work, &node->async_todo, !oneway, &enqueue_task);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 #if defined(CONFIG_OPLUS_FEATURE_BINDER_STATS_ENABLE)
 		if (NULL != proc && NULL != proc->tsk) {
 			binder_notify_obj.binder_task = proc->tsk;
 			call_binderevent_notifiers(0, (void *)&binder_notify_obj);
 		}
 #endif
-		binder_enqueue_work_ilocked(&t->work, &node->async_todo);
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+		if (enqueue_task)
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
+			binder_enqueue_work_ilocked(&t->work, &node->async_todo);
 	}
 #ifdef CONFIG_OPLUS_FEATURE_FRAME_BOOST
 	fbg_binder_wakeup_hook(NULL, current, proc->tsk, thread ? thread->task : NULL, t->code,
 			pending_async, !oneway);
 #endif
 
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+	android_vh_binder_proc_transaction_finish_handler(proc, t,
+		thread ? thread->task : NULL, pending_async, !oneway);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 	if (!pending_async) {
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
 		if (thread && thread->task) {
@@ -3710,7 +3740,9 @@ static void binder_transaction(struct binder_proc *proc,
 	binder_stats_created(BINDER_STAT_TRANSACTION_COMPLETE);
 
 	t->debug_id = t_debug_id;
-
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+	t->async_ux_enable = -1;
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 	if (reply)
 		binder_debug(BINDER_DEBUG_TRANSACTION,
 			     "%d:%d BC_REPLY %d -> %d:%d, data %016llx-%016llx size %lld-%lld-%lld\n",
@@ -3812,6 +3844,9 @@ static void binder_transaction(struct binder_proc *proc,
 	t->buffer->target_node = target_node;
 	t->buffer->clear_on_free = !!(t->flags & TF_CLEAR_BUF);
 	trace_binder_transaction_alloc_buf(t->buffer);
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+	android_vh_alloc_oem_binder_struct_handler(tr, t, target_proc);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 
 	if (binder_alloc_copy_user_to_buffer(
 				&target_proc->alloc,
@@ -4155,7 +4190,11 @@ static void binder_transaction(struct binder_proc *proc,
 
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
 		if (sysctl_sched_assist_enabled && !proc->proc_type) {
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+			binder_unset_inherit_ux(thread->task, true);
+#else
 			binder_unset_inherit_ux(thread->task);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 		}
 #endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
 #ifdef CONFIG_OPLUS_BINDER_STRATEGY
@@ -4311,6 +4350,10 @@ binder_free_buf(struct binder_proc *proc,
 		struct binder_thread *thread,
 		struct binder_buffer *buffer, bool is_failure)
 {
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+	bool enqueue_task = true;
+	android_vh_binder_free_buf_handler(proc, thread, buffer);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 	binder_inner_proc_lock(proc);
 	if (buffer->transaction) {
 		buffer->transaction->buffer = NULL;
@@ -4330,8 +4373,13 @@ binder_free_buf(struct binder_proc *proc,
 		if (!w) {
 			buf_node->has_async_transaction = false;
 		} else {
-			binder_enqueue_work_ilocked(
-					w, &proc->todo);
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+			android_vh_binder_special_task_handler(NULL, proc, thread, w,
+				&proc->todo, false, &enqueue_task);
+			if (enqueue_task)
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
+				binder_enqueue_work_ilocked(
+						w, &proc->todo);
 			binder_wakeup_proc_ilocked(proc);
 		}
 		binder_node_inner_unlock(buf_node);
@@ -4845,7 +4893,11 @@ static int binder_wait_for_work(struct binder_thread *thread,
 				 &proc->waiting_threads);
 
 			if (sysctl_sched_assist_enabled) {
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+				binder_unset_inherit_ux(thread->task, true);
+#else
 				binder_unset_inherit_ux(thread->task);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 			}
 		}
 #else /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
@@ -5246,7 +5298,11 @@ retry:
 						task_active_pid_ns(current));
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
 			if (sysctl_sched_assist_enabled) {
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+				binder_set_inherit_ux(thread->task, t_from->task, true);
+#else
 				binder_set_inherit_ux(thread->task, t_from->task);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 			}
 #endif /* defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_OPLUS_FEATURE_SCHED_ASSIST) */
 #if defined(CONFIG_OPLUS_FEATURE_FRAME_BOOST)
@@ -5318,6 +5374,9 @@ retry:
 		ptr += trsize;
 
 		trace_binder_transaction_received(t);
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+		android_vh_binder_transaction_received_handler(t, proc, thread, cmd);
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 #ifdef CONFIG_SCHED_WALT
 		if (current->wts.low_latency & WALT_LOW_LATENCY_BINDER)
 			thread->task->wts.low_latency &=

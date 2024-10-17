@@ -630,6 +630,9 @@ struct binder_transaction {
 	 * during thread teardown
 	 */
 	spinlock_t lock;
+#if defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX)
+	int async_ux_enable;
+#endif /* defined(CONFIG_OPLUS_FEATURE_ASYNC_BINDER_INHERIT_UX) */
 	ANDROID_VENDOR_DATA(1);
 };
 
